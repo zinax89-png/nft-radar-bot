@@ -149,22 +149,23 @@ async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_u
         if not prefs.get(category, True):
             continue
         delivered_media = False
+        message_text = text
+        if not prefs.get("prices", True):
+            message_text = "\\n".join(line for line in message_text.split("\\n") if not any(x in line.lower() for x in ("цена:", "💰")))
+        if not prefs.get("links", True):
+            message_text = "\\n".join(line for line in message_text.split("\\n") if not any(x in line.lower() for x in ("http://", "https://", "🔗", "🛒")))
+        selected_url = gift_url if prefs.get("links", True) else None
         if photo and prefs.get("images", True):
-            delivered_media = await send_photo(session, subscriber_id, photo, text, gift_url=gift_url)
+            delivered_media = await send_photo(session, subscriber_id, photo, message_text, gift_url=selected_url)
         elif sticker_file_id and prefs.get("images", True):
             sticker_result = await telegram_call(session, "sendSticker", {
                 "chat_id": subscriber_id,
                 "sticker": sticker_file_id,
             })
             if sticker_result.get("ok"):
-                delivered_media = await send_message(session, subscriber_id, text)
+                delivered_media = await send_message(session, subscriber_id, message_text, gift_url=selected_url)
         if not delivered_media:
-            message_text = text
-            if not prefs.get("prices", True):
-                message_text = "\n".join(line for line in message_text.split("\n") if not any(x in line.lower() for x in ("цена:", "💰")))
-            if not prefs.get("links", True):
-                message_text = "\n".join(line for line in message_text.split("\n") if not any(x in line.lower() for x in ("http://", "https://", "🔗", "🛒")))
-            delivered_media = await send_message(session, subscriber_id, message_text, gift_url=gift_url if prefs.get("links", True) else None)
+            delivered_media = await send_message(session, subscriber_id, message_text, gift_url=selected_url)
         if delivered_media:
             sent += 1
         await asyncio.sleep(0.05)
