@@ -371,6 +371,10 @@ async def handle_update(session, update):
     if callback:
         callback_data = callback.get("data", "")
         callback_user = int((callback.get("from") or {}).get("id", 0))
+        if callback_data == "settings:refresh":
+            await telegram_call(session, "answerCallbackQuery", {"callback_query_id": callback["id"]})
+            await show_settings(session, callback_user, callback.get("message", {}).get("message_id"))
+            return
         if callback_data.startswith("setting:"):
             _, key = callback_data.split(":", 1)
             if key in DEFAULT_SETTINGS:
