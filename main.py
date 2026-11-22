@@ -240,6 +240,10 @@ async def scan_portals_sales(session):
                 body = await response.text()
                 logging.error("Portals API access error %s: %s", response.status, body[:500])
                 return
+            if response.status == 422:
+                body = await response.text()
+                logging.error("Portals request validation error (422): %s", body[:1000])
+                return
             response.raise_for_status()
             data = await response.json()
 
