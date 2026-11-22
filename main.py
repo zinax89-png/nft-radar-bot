@@ -26,10 +26,12 @@ offset = 0
 state_sha = None
 gift_catalog = {}
 portals_seen_sales = []
+user_settings = {}
+DEFAULT_SETTINGS = {"new_gifts": True, "nft": True, "sales": True, "images": True, "links": True, "prices": True}
 
 
 async def load_state(session):
-    global users, offset, state_sha, gift_catalog, portals_seen_sales
+    global users, offset, state_sha, gift_catalog, portals_seen_sales, user_settings
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -44,6 +46,7 @@ async def load_state(session):
             state_sha = None
             gift_catalog = {}
             portals_seen_sales = []
+            user_settings = {}
             return
         response.raise_for_status()
         data = await response.json()
@@ -55,6 +58,7 @@ async def load_state(session):
     offset = int(state.get("offset", 0))
     gift_catalog = {str(k): v for k, v in state.get("gift_catalog", {}).items()}
     portals_seen_sales = [str(x) for x in state.get("portals_seen_sales", [])]
+    user_settings = {str(k): {**DEFAULT_SETTINGS, **v} for k, v in state.get("user_settings", {}).items()}
 
 
 async def save_state(session):
@@ -65,6 +69,7 @@ async def save_state(session):
         "offset": offset,
         "gift_catalog": gift_catalog,
         "portals_seen_sales": portals_seen_sales[-2000:],
+        "user_settings": user_settings,
     }
     encoded = base64.b64encode(
         json.dumps(state, ensure_ascii=False).encode("utf-8")
@@ -137,13 +142,16 @@ async def send_photo(session, chat_id, photo, caption, gift_url=None):
     return bool(result.get("ok"))
 
 
-async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_url=None):
+async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_url=None, category="new_gifts"):
     sent = 0
     for subscriber_id in list(users):
+        prefs = user_settings.get(str(subscriber_id), DEFAULT_SETTINGS)
+        if not prefs.get(category, True):
+            continue
         delivered_media = False
-        if photo:
+        if photo and prefs.get("images", True):
             delivered_media = await send_photo(session, subscriber_id, photo, text, gift_url=gift_url)
-        elif sticker_file_id:
+        elif sticker_file_id and prefs.get("images", True):
             sticker_result = await telegram_call(session, "sendSticker", {
                 "chat_id": subscriber_id,
                 "sticker": sticker_file_id,
@@ -151,7 +159,12 @@ async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_u
             if sticker_result.get("ok"):
                 delivered_media = await send_message(session, subscriber_id, text)
         if not delivered_media:
-            delivered_media = await send_message(session, subscriber_id, text, gift_url=gift_url)
+            message_text = text
+            if not prefs.get("prices", True):
+                message_text = "\n".join(line for line in message_text.split("\n") if not any(x in line.lower() for x in ("цена:", "💰")))
+            if not prefs.get("links", True):
+                message_text = "\n".join(line for line in message_text.split("\n") if not any(x in line.lower() for x in ("http://", "https://", "🔗", "🛒")))
+            delivered_media = await send_message(session, subscriber_id, message_text, gift_url=gift_url if prefs.get("links", True) else None)
         if delivered_media:
             sent += 1
         await asyncio.sleep(0.05)
@@ -342,6 +355,7 @@ async def scan_portals_sales(session):
                 portals_sale_message(action),
                 photo=extract_nft_image(action.get("nft") or {}),
                 gift_url=extract_nft_url(action),
+                category="sales",
             )
         known.add(key)
     portals_seen_sales = list(known)[-2000:]
@@ -352,6 +366,20 @@ async def handle_update(session, update):
     global offset
 
     offset = max(offset, int(update["update_id"]) + 1)
+    callback = update.get("callback_query")
+    if callback:
+        callback_data = callback.get("data", "")
+        callback_user = int((callback.get("from") or {}).get("id", 0))
+        if callback_data.startswith("setting:"):
+            _, key = callback_data.split(":", 1)
+            if key in DEFAULT_SETTINGS:
+                prefs = user_settings.setdefault(str(callback_user), DEFAULT_SETTINGS.copy())
+                prefs[key] = not prefs.get(key, True)
+                await telegram_call(session, "answerCallbackQuery", {"callback_query_id": callback["id"], "text": "Настройка сохранена"})
+                await show_settings(session, callback_user, callback.get("message", {}).get("message_id"))
+            return
+        return
+
     message = update.get("message")
     if not message or not message.get("text"):
         return
@@ -363,6 +391,7 @@ async def handle_update(session, update):
 
     if command in ("/start", "/subscribe"):
         users.add(user_id)
+        user_settings.setdefault(str(user_id), DEFAULT_SETTINGS.copy())
         await send_message(
             session,
             user_id,
@@ -374,6 +403,10 @@ async def handle_update(session, update):
     elif command in ("/stop", "/unsubscribe"):
         users.discard(user_id)
         await send_message(session, user_id, "🔕 Ты отписался от уведомлений. Чтобы подписаться снова: /start")
+
+    elif command == "/settings":
+        user_settings.setdefault(str(user_id), DEFAULT_SETTINGS.copy())
+        await show_settings(session, user_id)
 
     elif command == "/help":
         help_text = (
@@ -445,6 +478,26 @@ async def handle_update(session, update):
         )
 
 
+async def show_settings(session, chat_id, message_id=None):
+    prefs = {**DEFAULT_SETTINGS, **user_settings.get(str(chat_id), {})}
+    labels = {
+        "new_gifts": "🆕 Новые подарки", "nft": "💎 Новые NFT",
+        "sales": "💸 Продажи NFT", "images": "🖼 Изображения",
+        "links": "🔗 Ссылки", "prices": "💰 Цены",
+    }
+    keyboard = [[{"text": f"{'✅' if prefs[key] else '❌'} {label}", "callback_data": f"setting:{key}"}]
+                for key, label in labels.items()]
+    keyboard.append([{"text": "🔄 Обновить", "callback_data": "settings:refresh"}])
+    payload = {"chat_id": chat_id, "text": "⚙️ НАСТРОЙКИ УВЕДОМЛЕНИЙ\\n\\nНажимай на кнопки, чтобы включать или выключать уведомления:",
+               "reply_markup": {"inline_keyboard": keyboard}}
+    if message_id:
+        payload["message_id"] = message_id
+        result = await telegram_call(session, "editMessageText", payload)
+        if result.get("ok"):
+            return
+    await telegram_call(session, "sendMessage", payload)
+
+
 async def register_bot_commands(session):
     commands = [
         {"command": "start", "description": "Подписаться на уведомления"},
@@ -452,6 +505,7 @@ async def register_bot_commands(session):
         {"command": "subscribe", "description": "Подписаться на уведомления"},
         {"command": "unsubscribe", "description": "Отписаться от уведомлений"},
         {"command": "status", "description": "Статус подписки"},
+        {"command": "settings", "description": "Настройки уведомлений"},
         {"command": "test", "description": "Тестовое уведомление"},
         {"command": "help", "description": "Список команд"},
         {"command": "id", "description": "Показать мой Telegram ID"},
@@ -471,7 +525,7 @@ async def main():
             {
                 "offset": offset,
                 "timeout": 0,
-                "allowed_updates": ["message"],
+                "allowed_updates": ["message", "callback_query"],
             },
         )
         if not result.get("ok"):
