@@ -1,0 +1,24 @@
+services:
+  - type: worker
+    name: global-nft-radar
+    runtime: python
+    region: frankfurt
+    plan: starter
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python worker.py
+    autoDeployTrigger: off
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: PORTALS_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPOSITORY
+        value: zinax89-png/nft-radar-bot
+      - key: POLL_INTERVAL_SECONDS
+        value: "15"
