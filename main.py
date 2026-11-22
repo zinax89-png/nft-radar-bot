@@ -319,6 +319,21 @@ async def handle_update(session, update):
         )
         await send_message(session, user_id, answer)
 
+    elif command == "/test":
+        if user_id not in users:
+            await send_message(session, user_id, "Сначала подпишись командой /start.")
+            return
+        test_text = (
+            "🧪 ТЕСТОВОЕ УВЕДОМЛЕНИЕ GLOBAL NFT RADAR\n\n"
+            "Если ты видишь это сообщение, бот успешно отправляет уведомления.\n"
+            "Мониторинг новых подарков и продаж продолжает работать."
+        )
+        delivered = await send_message(session, user_id, test_text)
+        if delivered:
+            logging.info("Test notification delivered to subscriber %s.", user_id)
+        else:
+            logging.warning("Test notification delivery failed for subscriber %s.", user_id)
+
     elif command == "/broadcast":
         if user_id != ADMIN_ID or ADMIN_ID == 0:
             return
