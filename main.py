@@ -151,9 +151,9 @@ async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_u
         delivered_media = False
         message_text = text
         if not prefs.get("prices", True):
-            message_text = "\\n".join(line for line in message_text.split("\\n") if not any(x in line.lower() for x in ("цена:", "💰")))
+            message_text = "\n".join(line for line in message_text.split("\n") if not any(x in line.lower() for x in ("цена:", "💰")))
         if not prefs.get("links", True):
-            message_text = "\\n".join(line for line in message_text.split("\\n") if not any(x in line.lower() for x in ("http://", "https://", "🔗", "🛒")))
+            message_text = "\n".join(line for line in message_text.split("\n") if not any(x in line.lower() for x in ("http://", "https://", "🔗", "🛒")))
         selected_url = gift_url if prefs.get("links", True) else None
         if photo and prefs.get("images", True):
             delivered_media = await send_photo(session, subscriber_id, photo, message_text, gift_url=selected_url)
@@ -493,7 +493,7 @@ async def show_settings(session, chat_id, message_id=None):
     keyboard = [[{"text": f"{'✅' if prefs[key] else '❌'} {label}", "callback_data": f"setting:{key}"}]
                 for key, label in labels.items()]
     keyboard.append([{"text": "🔄 Обновить", "callback_data": "settings:refresh"}])
-    payload = {"chat_id": chat_id, "text": "⚙️ НАСТРОЙКИ УВЕДОМЛЕНИЙ\\n\\nНажимай на кнопки, чтобы включать или выключать уведомления:",
+    payload = {"chat_id": chat_id, "text": "⚙️ НАСТРОЙКИ УВЕДОМЛЕНИЙ\n\nНажимай на кнопки, чтобы включать или выключать уведомления:",
                "reply_markup": {"inline_keyboard": keyboard}}
     if message_id:
         payload["message_id"] = message_id
