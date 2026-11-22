@@ -1,0 +1,6 @@
+name = "global-nft-radar"
+main = "src/index.js"
+compatibility_date = "2026-11-22"
+
+[triggers]
+crons = ["*/5 * * * *"]
