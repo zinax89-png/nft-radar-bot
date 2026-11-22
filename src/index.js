@@ -360,8 +360,12 @@ async function scheduled(env) {
 
 export default {
   async fetch(request, env) {
-    if (!env.BOT_TOKEN || !env.GITHUB_TOKEN || !env.GITHUB_REPOSITORY || !env.WEBHOOK_SECRET) {
-      return new Response("Missing required Worker secrets/configuration.", { status: 500 });
+    const missing = ["BOT_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY", "WEBHOOK_SECRET"].filter(name => !env[name]);
+    if (missing.length) {
+      return new Response("Missing Worker configuration: " + missing.join(", "), {
+        status: 500,
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
+      });
     }
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/telegram-webhook") {
