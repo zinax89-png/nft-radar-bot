@@ -195,10 +195,10 @@ def gift_description(gift):
     gift_id = str(gift.get("id", "unknown"))
     price = gift.get("star_count", "—")
     return (
-        f"{emoji} Новый подарок Telegram\\n"
-        f"ID: {gift_id}\\n"
-        f"💰 Цена: {price} ⭐\\n\\n"
-        "🔗 Подарки: https://t.me/gifts\\n"
+        f"{emoji} Новый подарок Telegram\n"
+        f"ID: {gift_id}\n"
+        f"💰 Цена: {price} ⭐\n\n"
+        "🔗 Подарки: https://t.me/gifts\n"
         "🛒 Маркет: https://portal-market.com"
     )
 
@@ -249,10 +249,10 @@ def portals_sale_message(action):
     price = action.get("amount", "—")
     gift_url = extract_nft_url(action) or "https://t.me/gifts"
     return (
-        "💸 Продажа Telegram-подарка\\n"
-        f"🎁 {gift_label}\\n"
-        f"💰 Цена: {price} GRAM\\n\\n"
-        f"🔗 Подарок: {gift_url}\\n"
+        "💸 Продажа Telegram-подарка\n"
+        f"🎁 {gift_label}\n"
+        f"💰 Цена: {price} GRAM\n\n"
+        f"🔗 Подарок: {gift_url}\n"
         "🛒 Маркет: https://portal-market.com"
     )
 
