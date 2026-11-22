@@ -101,16 +101,17 @@ async def telegram_call(session, method, payload=None):
         return data
 
 
-async def send_message(session, chat_id, text):
-    result = await telegram_call(
-        session,
-        "sendMessage",
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": False,
-        },
-    )
+async def send_message(session, chat_id, text, gift_url=None):
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": False,
+    }
+    if gift_url and gift_url.startswith(("https://", "http://")):
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": "🎁 Открыть подарок", "url": gift_url}]]
+        }
+    result = await telegram_call(session, "sendMessage", payload)
     return bool(result.get("ok"))
 
 
@@ -122,21 +123,26 @@ async def broadcast_nft(session, text):
         await asyncio.sleep(0.05)
     logging.info("NFT alert delivered to %d/%d subscribers", sent, len(users))
 
-async def send_photo(session, chat_id, photo, caption):
-    result = await telegram_call(session, "sendPhoto", {
+async def send_photo(session, chat_id, photo, caption, gift_url=None):
+    payload = {
         "chat_id": chat_id,
         "photo": photo,
         "caption": caption[:1024],
-    })
+    }
+    if gift_url and gift_url.startswith(("https://", "http://")):
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": "🎁 Открыть подарок", "url": gift_url}]]
+        }
+    result = await telegram_call(session, "sendPhoto", payload)
     return bool(result.get("ok"))
 
 
-async def broadcast_gift(session, text, photo=None, sticker_file_id=None):
+async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_url=None):
     sent = 0
     for subscriber_id in list(users):
         delivered_media = False
         if photo:
-            delivered_media = await send_photo(session, subscriber_id, photo, text)
+            delivered_media = await send_photo(session, subscriber_id, photo, text, gift_url=gift_url)
         elif sticker_file_id:
             sticker_result = await telegram_call(session, "sendSticker", {
                 "chat_id": subscriber_id,
@@ -145,7 +151,7 @@ async def broadcast_gift(session, text, photo=None, sticker_file_id=None):
             if sticker_result.get("ok"):
                 delivered_media = await send_message(session, subscriber_id, text)
         if not delivered_media:
-            delivered_media = await send_message(session, subscriber_id, text)
+            delivered_media = await send_message(session, subscriber_id, text, gift_url=gift_url)
         if delivered_media:
             sent += 1
         await asyncio.sleep(0.05)
@@ -162,6 +168,19 @@ def extract_nft_image(nft):
                 nested = value.get(nested_key)
                 if isinstance(nested, str) and nested.startswith(("https://", "http://")):
                     return nested
+    return None
+
+
+def extract_nft_url(action):
+    # Use only a direct item URL supplied by the marketplace API.
+    nft = action.get("nft") or {}
+    keys = ("url", "link", "market_url", "marketplace_url", "permalink",
+            "nft_url", "item_url", "external_url")
+    for source in (nft, action):
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.startswith(("https://", "http://")):
+                return value
     return None
 
 
@@ -324,6 +343,7 @@ async def scan_portals_sales(session):
                 session,
                 portals_sale_message(action),
                 photo=extract_nft_image(action.get("nft") or {}),
+                gift_url=extract_nft_url(action),
             )
         known.add(key)
     portals_seen_sales = list(known)[-2000:]
