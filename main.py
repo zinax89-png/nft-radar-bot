@@ -1,87 +1,180 @@
 import os
 import json
+import base64
 import logging
 
-from telegram import Update
-from telegram.ext import (
-Application,
-CommandHandler,
-ContextTypes
+import aiohttp
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
 )
 
-logging.basicConfig(level=logging.INFO)
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+REPOSITORY = os.environ["GITHUB_REPOSITORY"]
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-TOKEN = os.getenv("BOT_TOKEN")
-USERS_FILE = "users.json"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+STATE_API = f"https://api.github.com/repos/{REPOSITORY}/contents/users.json"
 
-def load_users():
-try:
-with open(USERS_FILE, "r") as f:
-return set(json.load(f))
-except:
-return set()
+users = set()
+offset = 0
+state_sha = None
 
-def save_users():
-with open(USERS_FILE, "w") as f:
-json.dump(list(users), f)
 
-users = load_users()
+async def load_state(session):
+    global users, offset, state_sha
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-user_id = update.effective_user.id
-users.add(user_id)
-save_users()
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
-await update.message.reply_text(
-    "🚀 Добро пожаловать в Global NFT Radar!\n\n"
-    "Ты подписан на уведомления о новых NFT.\n"
-    "Команда /stop — отписаться.\n"
-    "Команда /status — статус подписки."
-)
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-users.discard(update.effective_user.id)
-save_users()
-await update.message.reply_text("Ты отписался от уведомлений.")
+    async with session.get(STATE_API, headers=headers) as response:
+        if response.status == 404:
+            users = set()
+            offset = 0
+            state_sha = None
+            return
+        response.raise_for_status()
+        data = await response.json()
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if update.effective_user.id in users:
-text = "✅ Ты подписан на уведомления."
-else:
-text = "❌ Ты не подписан."
-await update.message.reply_text(text)
+    state_sha = data["sha"]
+    raw = base64.b64decode(data["content"]).decode("utf-8")
+    state = json.loads(raw)
+    users = {int(user_id) for user_id in state.get("users", [])}
+    offset = int(state.get("offset", 0))
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if update.effective_user.id != int(os.getenv("ADMIN_ID", "0")):
-return
 
-message = " ".join(context.args)
+async def save_state(session):
+    global state_sha
 
-if not message:
-    await update.message.reply_text("Использование: /broadcast текст")
-    return
+    state = {
+        "users": sorted(users),
+        "offset": offset,
+    }
+    encoded = base64.b64encode(
+        json.dumps(state, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
 
-sent = 0
+    payload = {
+        "message": "Save Global NFT Radar bot state",
+        "content": encoded,
+    }
+    if state_sha:
+        payload["sha"] = state_sha
 
-for user_id in list(users):
-    try:
-        await context.bot.send_message(user_id, message)
-        sent += 1
-    except Exception:
-        logging.exception("Ошибка отправки")
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
-await update.message.reply_text(f"Рассылка завершена. Получателей: {sent}")
-def main():
-if not TOKEN:
-raise RuntimeError("Не задан BOT_TOKEN")
+    async with session.put(
+        STATE_API, headers=headers, json=payload
+    ) as response:
+        response.raise_for_status()
+        result = await response.json()
+        state_sha = result["content"]["sha"]
 
-app = Application.builder().token(TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("stop", stop))
-app.add_handler(CommandHandler("status", status))
-app.add_handler(CommandHandler("broadcast", broadcast))
+async def telegram_call(session, method, payload=None):
+    async with session.post(
+        f"{TELEGRAM_API}/{method}", json=payload or {}
+    ) as response:
+        data = await response.json()
+        if not data.get("ok"):
+            logging.warning("Telegram %s returned: %s", method, data)
+        return data
 
-print("Global NFT Radar запущен!")
-app.run_polling()
-if name == "main":
-main()
+
+async def send_message(session, chat_id, text):
+    result = await telegram_call(
+        session, "sendMessage", {"chat_id": chat_id, "text": text}
+    )
+    return bool(result.get("ok"))
+
+
+async def handle_update(session, update):
+    global offset
+
+    offset = max(offset, int(update["update_id"]) + 1)
+    message = update.get("message")
+    if not message or not message.get("text"):
+        return
+
+    sender = message.get("from", {})
+    user_id = int(sender.get("id", 0))
+    text = message["text"].strip()
+    command = text.split()[0].split("@")[0]
+
+    if command == "/start":
+        users.add(user_id)
+        await send_message(
+            session,
+            user_id,
+            "🚀 Добро пожаловать в Global NFT Radar!\n\n"
+            "Ты подписан на уведомления о новых NFT.\n"
+            "/stop — отписаться.\n"
+            "/status — статус подписки.",
+        )
+
+    elif command == "/stop":
+        users.discard(user_id)
+        await send_message(session, user_id, "Ты отписался от уведомлений.")
+
+    elif command == "/status":
+        answer = (
+            "✅ Ты подписан на уведомления."
+            if user_id in users
+            else "❌ Ты не подписан."
+        )
+        await send_message(session, user_id, answer)
+
+    elif command == "/broadcast":
+        if user_id != ADMIN_ID or ADMIN_ID == 0:
+            return
+
+        announcement = text.partition(" ")[2].strip()
+        if not announcement:
+            await send_message(session, user_id, "Использование: /broadcast текст")
+            return
+
+        sent = 0
+        for subscriber_id in list(users):
+            if await send_message(session, subscriber_id, announcement):
+                sent += 1
+        await send_message(
+            session, user_id, f"Рассылка завершена. Получателей: {sent}"
+        )
+
+
+async def main():
+    timeout = aiohttp.ClientTimeout(total=40)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        await load_state(session)
+
+        result = await telegram_call(
+            session,
+            "getUpdates",
+            {
+                "offset": offset,
+                "timeout": 0,
+                "allowed_updates": ["message"],
+            },
+        )
+        if not result.get("ok"):
+            raise RuntimeError("Не удалось получить обновления Telegram")
+
+        for update in result.get("result", []):
+            await handle_update(session, update)
+
+        await save_state(session)
+        logging.info("Готово. Подписчиков: %d", len(users))
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
