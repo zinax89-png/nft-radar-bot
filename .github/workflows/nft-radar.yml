@@ -38,5 +38,4 @@ jobs:
           ADMIN_ID: ${{ secrets.ADMIN_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          OPENSEA_API_KEY: ${{ secrets.OPENSEA_API_KEY }}
         run: python main.py
