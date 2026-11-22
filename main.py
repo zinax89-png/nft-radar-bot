@@ -23,13 +23,11 @@ STATE_API = f"https://api.github.com/repos/{REPOSITORY}/contents/users.json"
 users = set()
 offset = 0
 state_sha = None
-last_nft_scan = 0
-seen_nft_events = []
-chain_blocks = {}
+gift_catalog = {}
 
 
 async def load_state(session):
-    global users, offset, state_sha, last_nft_scan, seen_nft_events, chain_blocks
+    global users, offset, state_sha, gift_catalog
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -42,9 +40,7 @@ async def load_state(session):
             users = set()
             offset = 0
             state_sha = None
-            last_nft_scan = int(time.time()) - 300
-            seen_nft_events = []
-            chain_blocks = {}
+            gift_catalog = {}
             return
         response.raise_for_status()
         data = await response.json()
@@ -54,9 +50,7 @@ async def load_state(session):
     state = json.loads(raw)
     users = {int(user_id) for user_id in state.get("users", [])}
     offset = int(state.get("offset", 0))
-    last_nft_scan = int(state.get("last_nft_scan", int(time.time()) - 300))
-    seen_nft_events = list(state.get("seen_nft_events", []))[-1000:]
-    chain_blocks = {str(k): int(v) for k, v in state.get("chain_blocks", {}).items()}
+    gift_catalog = {str(k): v for k, v in state.get("gift_catalog", {}).items()}
 
 
 async def save_state(session):
@@ -65,9 +59,7 @@ async def save_state(session):
     state = {
         "users": sorted(users),
         "offset": offset,
-        "last_nft_scan": last_nft_scan,
-        "seen_nft_events": seen_nft_events[-1000:],
-        "chain_blocks": chain_blocks,
+        "gift_catalog": gift_catalog,
     }
     encoded = base64.b64encode(
         json.dumps(state, ensure_ascii=False).encode("utf-8")
@@ -126,198 +118,55 @@ async def broadcast_nft(session, text):
     logging.info("NFT alert delivered to %d/%d subscribers", sent, len(users))
 
 
-# PublicNode exposes public JSON-RPC endpoints; no API key is needed.
-CHAINS = {
-    "ethereum": {
-        "rpc": "https://rpc-eth.blockmachine.io",
-        "explorer": "https://etherscan.io",
-        "opensea": "ethereum",
-    },
-    "base": {
-        "rpc": "https://rpc-base.blockmachine.io",
-        "explorer": "https://basescan.org",
-        "opensea": "base",
-    },
-    "polygon": {
-        "rpc": "https://rpc-polygon.blockmachine.io",
-        "explorer": "https://polygonscan.com",
-        "opensea": "matic",
-    },
-    "arbitrum": {
-        "rpc": "https://rpc-arbitrum.blockmachine.io",
-        "explorer": "https://arbiscan.io",
-        "opensea": "arbitrum",
-    },
-}
+# Telegram Gifts catalog monitoring through the official Bot API.
+# getAvailableGifts returns gifts currently available to this bot.
+gift_catalog = {}
 
-# ERC-721 Transfer, ERC-1155 TransferSingle and TransferBatch.
-ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
-MINT_FILTERS = [
-    # ERC-721 Transfer: indexed "from" is topic 1.
-    ("erc721", ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", ZERO_ADDRESS_TOPIC]),
-    # ERC-1155: indexed "from" is topic 2.
-    ("erc1155", ["0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62", None, ZERO_ADDRESS_TOPIC]),
-    ("erc1155", ["0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb", None, ZERO_ADDRESS_TOPIC]),
-]
+def gift_description(gift):
+    sticker = gift.get('sticker') or {}
+    emoji = sticker.get('emoji') or '🎁'
+    gift_id = str(gift.get('id', 'unknown'))
+    lines = ['🎁 Новый подарок Telegram появился в каталоге!', '', 'Подарок: ' + emoji, 'ID: ' + gift_id, 'Цена: ' + str(gift.get('star_count', '—')) + ' ⭐']
+    if gift.get('upgrade_star_count') is not None:
+        lines.append('Улучшение до коллекционного: ' + str(gift['upgrade_star_count']) + ' ⭐')
+    if gift.get('total_count') is not None:
+        lines.append('Тираж: ' + str(gift['total_count']))
+    if gift.get('remaining_count') is not None:
+        lines.append('Осталось: ' + str(gift['remaining_count']))
+    if gift.get('unique_gift_variant_count') is not None:
+        lines.append('Вариантов коллекционного подарка: ' + str(gift['unique_gift_variant_count']))
+    if gift.get('is_premium'):
+        lines.append('Доступен только Telegram Premium')
+    publisher = gift.get('publisher_chat') or {}
+    if publisher:
+        lines.append('Издатель: ' + str(publisher.get('title') or publisher.get('username') or 'Канал'))
+    lines.extend(['', 'Каталог подарков Telegram: https://t.me/gifts'])
+    return '\n'.join(lines)
 
-
-def log_event_key(chain, log):
-    return f"{chain}:{log.get('transactionHash', '')}:{log.get('logIndex', '')}"
-
-
-def make_chain_mint_message(chain, log):
-    contract = log.get("address", "")
-    tx_hash = log.get("transactionHash", "")
-    token_id = "не указан"
-    topics = log.get("topics", [])
-    # ERC-721 stores token ID in topic 3. ERC-1155 stores IDs in event data.
-    try:
-        if topics and topics[0].lower() == MINT_FILTERS[0][1][0]:
-            if len(topics) >= 4:
-                token_id = str(int(topics[3], 16))
-        elif log.get("data") and log["data"] != "0x":
-            words = [
-                int(log["data"][i:i + 64], 16)
-                for i in range(2, len(log["data"]), 64)
-                if len(log["data"][i:i + 64]) == 64
-            ]
-            if topics[0].lower() == MINT_FILTERS[2][1][0] and len(words) > 2:
-                # TransferBatch: first word is the byte offset to the IDs array.
-                ids_index = words[0] // 32
-                if ids_index + 1 < len(words) and words[ids_index] > 0:
-                    token_id = str(words[ids_index + 1])
-            elif words:
-                token_id = str(words[0])
-    except (TypeError, ValueError, IndexError):
-        pass
-
-    cfg = CHAINS[chain]
-    marketplace_url = (
-        f"https://opensea.io/assets/{cfg['opensea']}/{contract}"
-        + (f"/{token_id}" if token_id != "не указан" else "")
-    )
-    explorer_url = f"{cfg['explorer']}/tx/{tx_hash}" if tx_hash else cfg["explorer"]
-    return (
-        f"🆕 Новый NFT mint в сети {chain.title()}!\n\n"
-        f"Контракт: {contract}\n"
-        f"Token ID: {token_id}\n"
-        f"Транзакция: {explorer_url}\n"
-        f"Открыть на OpenSea: {marketplace_url}"
-    )
-
-
-async def rpc_call(session, url, method, params):
-    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    async with session.post(url, json=payload) as response:
-        response.raise_for_status()
-        data = await response.json()
-    if "error" in data:
-        raise RuntimeError(f"RPC {method} error: {data['error']}")
-    return data.get("result")
-
-
-# Cache ERC-165 interface checks to reject contracts that only imitate NFT events.
-nft_contract_cache = {}
-
-
-async def is_nft_contract(session, chain, address):
-    cache_key = f"{chain}:{address.lower()}"
-    if cache_key in nft_contract_cache:
-        return nft_contract_cache[cache_key]
-
-    # ERC-721 = 0x80ac58cd; ERC-1155 = 0xd9b67a26.
-    for interface_id in ("80ac58cd", "d9b67a26"):
-        calldata = "0x01ffc9a7" + interface_id + ("0" * 56)
-        try:
-            result = await rpc_call(
-                session,
-                CHAINS[chain]["rpc"],
-                "eth_call",
-                [{"to": address, "data": calldata}, "latest"],
-            )
-            if result and int(result, 16) != 0:
-                nft_contract_cache[cache_key] = True
-                return True
-        except Exception:
+async def scan_telegram_gifts(session):
+    global gift_catalog
+    result = await telegram_call(session, 'getAvailableGifts')
+    if not result.get('ok'):
+        logging.error('Could not fetch Telegram gifts catalog.')
+        return
+    gifts = result.get('result', {}).get('gifts', [])
+    current = {}
+    for gift in gifts:
+        gift_id = str(gift.get('id', ''))
+        if not gift_id:
             continue
-
-    nft_contract_cache[cache_key] = False
-    return False
-
-
-async def scan_chain(session, chain):
-    global chain_blocks, seen_nft_events
-
-    cfg = CHAINS[chain]
-    rpc = cfg["rpc"]
-    latest_hex = await rpc_call(session, rpc, "eth_blockNumber", [])
-    latest = int(latest_hex, 16)
-
-    # Start close to the chain head on first run; do not send old historical mints.
-    cursor = chain_blocks.get(chain)
-    if cursor is None:
-        chain_blocks[chain] = max(0, latest - 3)
-        logging.info("%s initialized at block %d", chain, chain_blocks[chain])
+        current[gift_id] = {'star_count': gift.get('star_count'), 'upgrade_star_count': gift.get('upgrade_star_count'), 'total_count': gift.get('total_count'), 'remaining_count': gift.get('remaining_count'), 'unique_gift_variant_count': gift.get('unique_gift_variant_count'), 'is_premium': bool(gift.get('is_premium')), 'sticker_emoji': (gift.get('sticker') or {}).get('emoji'), 'publisher_chat': gift.get('publisher_chat')}
+    if not gift_catalog:
+        gift_catalog = current
+        logging.info('Telegram gifts baseline saved: %d gifts.', len(current))
         return
-
-    start_block = cursor + 1
-    if start_block > latest:
-        return
-
-    # Small ranges keep public RPC requests lightweight and reduce provider limits.
-    new_seen = set(seen_nft_events)
-    notifications = []
-    while start_block <= latest:
-        end_block = min(start_block + 499, latest)
-        for event_kind, topics in MINT_FILTERS:
-            logs = await rpc_call(
-                session,
-                rpc,
-                "eth_getLogs",
-                [{
-                    "fromBlock": hex(start_block),
-                    "toBlock": hex(end_block),
-                    "topics": topics,
-                }],
-            )
-            for log in logs or []:
-                # Event signatures alone are not enough: unrelated contracts can emit
-                # NFT-shaped logs. Confirm the contract advertises ERC-721 or ERC-1155.
-                if event_kind == "erc721" and len(log.get("topics", [])) != 4:
-                    continue
-                contract_address = log.get("address", "")
-                if not contract_address or not await is_nft_contract(
-                    session, chain, contract_address
-                ):
-                    continue
-                key = log_event_key(chain, log)
-                if key not in new_seen:
-                    new_seen.add(key)
-                    notifications.append((int(log.get("blockNumber", "0x0"), 16),
-                                          int(log.get("logIndex", "0x0"), 16),
-                                          make_chain_mint_message(chain, log)))
-
-        start_block = end_block + 1
-
-    notifications.sort(key=lambda item: (item[0], item[1]))
-    for _, _, message in notifications:
+    new_ids = [gift_id for gift_id in current if gift_id not in gift_catalog]
+    for gift_id in new_ids:
+        gift = next(item for item in gifts if str(item.get('id')) == gift_id)
         if users:
-            await broadcast_nft(session, message)
-
-    chain_blocks[chain] = latest
-    seen_nft_events = list(new_seen)[-1000:]
-    logging.info("%s scan complete through block %d; new mints: %d",
-                 chain, latest, len(notifications))
-
-
-async def scan_nfts(session):
-    for chain in CHAINS:
-        try:
-            await scan_chain(session, chain)
-        except Exception:
-            # Keep the previous cursor so this chain is retried on the next run.
-            logging.exception("NFT scan failed for %s", chain)
-
+            await broadcast_nft(session, gift_description(gift))
+    gift_catalog = current
+    logging.info('Telegram gifts scan complete. Catalog: %d; new gifts: %d', len(current), len(new_ids))
 
 async def handle_update(session, update):
     global offset
@@ -393,7 +242,7 @@ async def main():
         for update in result.get("result", []):
             await handle_update(session, update)
 
-        await scan_nfts(session)
+        await scan_telegram_gifts(session)
         await save_state(session)
         logging.info("Готово. Подписчиков: %d", len(users))
 
