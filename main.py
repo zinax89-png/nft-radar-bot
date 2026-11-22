@@ -216,6 +216,35 @@ async def rpc_call(session, url, method, params):
     return data.get("result")
 
 
+# Cache ERC-165 interface checks to reject contracts that only imitate NFT events.
+nft_contract_cache = {}
+
+
+async def is_nft_contract(session, chain, address):
+    cache_key = f"{chain}:{address.lower()}"
+    if cache_key in nft_contract_cache:
+        return nft_contract_cache[cache_key]
+
+    # ERC-721 = 0x80ac58cd; ERC-1155 = 0xd9b67a26.
+    for interface_id in ("80ac58cd", "d9b67a26"):
+        calldata = "0x01ffc9a7" + interface_id + ("0" * 56)
+        try:
+            result = await rpc_call(
+                session,
+                CHAINS[chain]["rpc"],
+                "eth_call",
+                [{"to": address, "data": calldata}, "latest"],
+            )
+            if result and int(result, 16) != 0:
+                nft_contract_cache[cache_key] = True
+                return True
+        except Exception:
+            continue
+
+    nft_contract_cache[cache_key] = False
+    return False
+
+
 async def scan_chain(session, chain):
     global chain_blocks, seen_nft_events
 
@@ -252,8 +281,14 @@ async def scan_chain(session, chain):
                 }],
             )
             for log in logs or []:
-                # ERC-20 uses the same Transfer signature as ERC-721, but has only 3 topics.
+                # Event signatures alone are not enough: unrelated contracts can emit
+                # NFT-shaped logs. Confirm the contract advertises ERC-721 or ERC-1155.
                 if event_kind == "erc721" and len(log.get("topics", [])) != 4:
+                    continue
+                contract_address = log.get("address", "")
+                if not contract_address or not await is_nft_contract(
+                    session, chain, contract_address
+                ):
                     continue
                 key = log_event_key(chain, log)
                 if key not in new_seen:
