@@ -165,13 +165,25 @@ def make_chain_mint_message(chain, log):
     tx_hash = log.get("transactionHash", "")
     token_id = "не указан"
     topics = log.get("topics", [])
-    # ERC-721 token ID is topic 3; ERC-1155 token ID is the first data word.
+    # ERC-721 stores token ID in topic 3. ERC-1155 stores IDs in event data.
     try:
-        if len(topics) >= 4:
-            token_id = str(int(topics[3], 16))
+        if topics and topics[0].lower() == MINT_FILTERS[0][1][0]:
+            if len(topics) >= 4:
+                token_id = str(int(topics[3], 16))
         elif log.get("data") and log["data"] != "0x":
-            token_id = str(int(log["data"][2:66], 16))
-    except (TypeError, ValueError):
+            words = [
+                int(log["data"][i:i + 64], 16)
+                for i in range(2, len(log["data"]), 64)
+                if len(log["data"][i:i + 64]) == 64
+            ]
+            if topics[0].lower() == MINT_FILTERS[2][1][0] and len(words) > 2:
+                # TransferBatch: first word is the byte offset to the IDs array.
+                ids_index = words[0] // 32
+                if ids_index + 1 < len(words) and words[ids_index] > 0:
+                    token_id = str(words[ids_index + 1])
+            elif words:
+                token_id = str(words[0])
+    except (TypeError, ValueError, IndexError):
         pass
 
     cfg = CHAINS[chain]
@@ -181,10 +193,10 @@ def make_chain_mint_message(chain, log):
     )
     explorer_url = f"{cfg['explorer']}/tx/{tx_hash}" if tx_hash else cfg["explorer"]
     return (
-        f"🆕 Новый NFT mint в сети {chain.title()}!\\n\\n"
-        f"Контракт: {contract}\\n"
-        f"Token ID: {token_id}\\n"
-        f"Транзакция: {explorer_url}\\n"
+        f"🆕 Новый NFT mint в сети {chain.title()}!\n\n"
+        f"Контракт: {contract}\n"
+        f"Token ID: {token_id}\n"
+        f"Транзакция: {explorer_url}\n"
         f"Открыть на OpenSea: {marketplace_url}"
     )
 
