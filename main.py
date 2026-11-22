@@ -189,18 +189,34 @@ def extract_nft_url(action):
 # getAvailableGifts returns gifts currently available to this bot.
 gift_catalog = {}
 
+def extract_gift_url(gift):
+    # A direct collectible URL is included only when the source API provides it.
+    keys = ("url", "link", "gift_url", "nft_url", "item_url", "permalink")
+    for source in (gift, gift.get("gift") or {}):
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.startswith(("https://", "http://")):
+                return value
+    return None
+
+
 def gift_description(gift):
     sticker = gift.get("sticker") or {}
     emoji = sticker.get("emoji") or "🎁"
     gift_id = str(gift.get("id", "unknown"))
     price = gift.get("star_count", "—")
-    return (
-        f"{emoji} Новый подарок Telegram\n"
-        f"ID: {gift_id}\n"
-        f"💰 Цена: {price} ⭐\n\n"
-        "🔗 Подарки: https://t.me/gifts\n"
-        "🛒 Маркет: https://portal-market.com"
-    )
+    direct_url = extract_gift_url(gift)
+    lines = [
+        f"{emoji} Новый подарок Telegram",
+        f"ID: {gift_id}",
+        f"💰 Цена: {price} ⭐",
+    ]
+    if direct_url:
+        lines.extend(["", f"🔗 Открыть конкретный подарок: {direct_url}"])
+    else:
+        lines.extend(["", "ℹ️ Telegram API не предоставил прямую ссылку на этот подарок."])
+    lines.append("🛒 Маркет: https://portal-market.com")
+    return "\n".join(lines)
 
 async def scan_telegram_gifts(session):
     global gift_catalog
@@ -247,14 +263,18 @@ def portals_sale_message(action):
     number = nft.get("number") or nft.get("external_collection_number")
     gift_label = str(name) + (f" #{number}" if number is not None else "")
     price = action.get("amount", "—")
-    gift_url = extract_nft_url(action) or "https://t.me/gifts"
-    return (
-        "💸 Продажа Telegram-подарка\n"
-        f"🎁 {gift_label}\n"
-        f"💰 Цена: {price} GRAM\n\n"
-        f"🔗 Подарок: {gift_url}\n"
-        "🛒 Маркет: https://portal-market.com"
-    )
+    gift_url = extract_nft_url(action)
+    lines = [
+        "💸 Продажа Telegram-подарка",
+        f"🎁 {gift_label}",
+        f"💰 Цена: {price} GRAM",
+    ]
+    if gift_url:
+        lines.extend(["", f"🔗 Открыть конкретный лот: {gift_url}"])
+    else:
+        lines.extend(["", "ℹ️ Portals API не передал прямую ссылку на этот лот."])
+    lines.append("🛒 Маркет: https://portal-market.com")
+    return "\n".join(lines)
 
 async def scan_portals_sales(session):
     global portals_seen_sales
