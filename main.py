@@ -231,7 +231,9 @@ async def scan_portals_sales(session):
 
     # Read newest completed purchases, paging until we reach already-seen data.
     for page in range(35):  # API documents offsets up to 700, 20 actions/page.
-        params = {"action_types": "purchase", "limit": 20, "offset": offset_value, "sort_by": "created_at desc"}
+        # Use the documented default market feed; filter purchases locally.
+        # This avoids inconsistent validation of optional array query parameters.
+        params = {"limit": 20, "offset": offset_value}
         async with session.get(url, headers=headers, params=params) as response:
             if response.status == 503:
                 logging.warning("Portals market feed temporarily unavailable (503).")
@@ -247,9 +249,10 @@ async def scan_portals_sales(session):
             response.raise_for_status()
             data = await response.json()
 
-        actions = data.get("actions", []) if isinstance(data, dict) else []
-        if not actions:
+        market_actions = data.get("actions", []) if isinstance(data, dict) else []
+        if not market_actions:
             break
+        actions = [a for a in market_actions if a.get("type") == "purchase"]
         page_new = []
         reached_known = False
         for action in actions:
@@ -259,7 +262,7 @@ async def scan_portals_sales(session):
                 continue
             page_new.append((key, action))
         found.extend(page_new)
-        if reached_known or len(actions) < 20:
+        if reached_known or len(market_actions) < 20:
             break
         offset_value += 20
         await asyncio.sleep(1.05)  # respect the documented free-tier rate limit
