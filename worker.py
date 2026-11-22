@@ -13,6 +13,7 @@ POLL_INTERVAL = max(10, int(os.getenv("POLL_INTERVAL_SECONDS", "15")))
 async def run_worker():
     timeout = aiohttp.ClientTimeout(total=40)
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        await bot.register_bot_commands(session)
         await bot.load_state(session)
         logging.info("Persistent NFT Radar worker started. Poll interval: %s seconds.", POLL_INTERVAL)
 
