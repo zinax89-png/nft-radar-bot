@@ -129,22 +129,22 @@ async def broadcast_nft(session, text):
 # PublicNode exposes public JSON-RPC endpoints; no API key is needed.
 CHAINS = {
     "ethereum": {
-        "rpc": "https://rpcfree.com/ethereum-rpc",
+        "rpc": "https://rpc-eth.blockmachine.io",
         "explorer": "https://etherscan.io",
         "opensea": "ethereum",
     },
     "base": {
-        "rpc": "https://rpcfree.com/base-rpc",
+        "rpc": "https://rpc-base.blockmachine.io",
         "explorer": "https://basescan.org",
         "opensea": "base",
     },
     "polygon": {
-        "rpc": "https://rpcfree.com/polygon-rpc",
+        "rpc": "https://rpc-polygon.blockmachine.io",
         "explorer": "https://polygonscan.com",
         "opensea": "matic",
     },
     "arbitrum": {
-        "rpc": "https://rpcfree.com/arbitrum-rpc",
+        "rpc": "https://rpc-arbitrum.blockmachine.io",
         "explorer": "https://arbiscan.io",
         "opensea": "arbitrum",
     },
