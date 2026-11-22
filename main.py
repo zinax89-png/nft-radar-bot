@@ -156,6 +156,7 @@ async def broadcast_gift(session, text, photo=None, sticker_file_id=None, gift_u
             sent += 1
         await asyncio.sleep(0.05)
     logging.info("Gift alert delivered to %d/%d subscribers", sent, len(users))
+    return sent
 
 
 def extract_nft_image(nft):
@@ -363,28 +364,52 @@ async def handle_update(session, update):
     text = message["text"].strip()
     command = text.split()[0].split("@")[0]
 
-    if command == "/start":
+    if command in ("/start", "/subscribe"):
         users.add(user_id)
         await send_message(
             session,
             user_id,
             "🚀 Добро пожаловать в Global NFT Radar!\n\n"
-            "Ты подписан на уведомления о новых NFT.\n"
-            "/stop — отписаться.\n"
-            "/status — статус подписки.",
+            "✅ Ты подписан на уведомления о новых Telegram-подарках и продажах на Portals.\n\n"
+            "Команды: /help",
         )
 
-    elif command == "/stop":
+    elif command in ("/stop", "/unsubscribe"):
         users.discard(user_id)
-        await send_message(session, user_id, "Ты отписался от уведомлений.")
+        await send_message(session, user_id, "🔕 Ты отписался от уведомлений. Чтобы подписаться снова: /start")
+
+    elif command == "/help":
+        help_text = (
+            "📡 GLOBAL NFT RADAR — команды\n\n"
+            "/start или /subscribe — подписаться на уведомления\n"
+            "/stop или /unsubscribe — отписаться\n"
+            "/status — проверить подписку\n"
+            "/test — получить тестовое уведомление\n"
+            "/help — показать эту справку"
+        )
+        await send_message(session, user_id, help_text)
 
     elif command == "/status":
         answer = (
             "✅ Ты подписан на уведомления."
             if user_id in users
-            else "❌ Ты не подписан."
+            else "❌ Ты не подписан. Напиши /start."
         )
+        answer += f"\n\n👥 Всего подписчиков: {len(users)}"
         await send_message(session, user_id, answer)
+
+    elif command == "/id":
+        await send_message(session, user_id, f"Твой Telegram ID: {user_id}")
+
+    elif command == "/stats":
+        if user_id != ADMIN_ID or ADMIN_ID == 0:
+            return
+        await send_message(
+            session, user_id,
+            f"📊 Статистика Global NFT Radar\\n\\nПодписчиков: {len(users)}"
+            f"\\nПодарков в каталоге: {len(gift_catalog)}"
+            f"\\nПродаж в базе: {len(portals_seen_sales)}"
+        )
 
     elif command == "/test":
         if user_id not in users:
@@ -422,9 +447,22 @@ async def handle_update(session, update):
         )
 
 
+async def register_bot_commands(session):
+    commands = [
+        {"command": "start", "description": "Подписаться на уведомления"},
+        {"command": "stop", "description": "Отписаться от уведомлений"},
+        {"command": "status", "description": "Статус подписки"},
+        {"command": "test", "description": "Тестовое уведомление"},
+        {"command": "help", "description": "Список команд"},
+        {"command": "id", "description": "Показать мой Telegram ID"},
+    ]
+    await telegram_call(session, "setMyCommands", {"commands": commands})
+
+
 async def main():
     timeout = aiohttp.ClientTimeout(total=40)
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        await register_bot_commands(session)
         await load_state(session)
 
         result = await telegram_call(
