@@ -146,7 +146,7 @@ def gift_description(gift):
     if publisher:
         lines.append('Издатель: ' + str(publisher.get('title') or publisher.get('username') or 'Канал'))
     lines.extend(['', 'Каталог подарков Telegram: https://t.me/gifts'])
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 async def scan_telegram_gifts(session):
     global gift_catalog
