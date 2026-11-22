@@ -122,6 +122,48 @@ async def broadcast_nft(session, text):
         await asyncio.sleep(0.05)
     logging.info("NFT alert delivered to %d/%d subscribers", sent, len(users))
 
+async def send_photo(session, chat_id, photo, caption):
+    result = await telegram_call(session, "sendPhoto", {
+        "chat_id": chat_id,
+        "photo": photo,
+        "caption": caption[:1024],
+    })
+    return bool(result.get("ok"))
+
+
+async def broadcast_gift(session, text, photo=None, sticker_file_id=None):
+    sent = 0
+    for subscriber_id in list(users):
+        delivered_media = False
+        if photo:
+            delivered_media = await send_photo(session, subscriber_id, photo, text)
+        elif sticker_file_id:
+            sticker_result = await telegram_call(session, "sendSticker", {
+                "chat_id": subscriber_id,
+                "sticker": sticker_file_id,
+            })
+            if sticker_result.get("ok"):
+                delivered_media = await send_message(session, subscriber_id, text)
+        if not delivered_media:
+            delivered_media = await send_message(session, subscriber_id, text)
+        if delivered_media:
+            sent += 1
+        await asyncio.sleep(0.05)
+    logging.info("Gift alert delivered to %d/%d subscribers", sent, len(users))
+
+
+def extract_nft_image(nft):
+    for key in ("image_url", "image", "imageUrl", "photo_url", "thumbnail", "preview", "cover"):
+        value = nft.get(key)
+        if isinstance(value, str) and value.startswith(("https://", "http://")):
+            return value
+        if isinstance(value, dict):
+            for nested_key in ("url", "src"):
+                nested = value.get(nested_key)
+                if isinstance(nested, str) and nested.startswith(("https://", "http://")):
+                    return nested
+    return None
+
 
 # Telegram Gifts catalog monitoring through the official Bot API.
 # getAvailableGifts returns gifts currently available to this bot.
@@ -169,7 +211,8 @@ async def scan_telegram_gifts(session):
     for gift_id in new_ids:
         gift = next(item for item in gifts if str(item.get('id')) == gift_id)
         if users:
-            await broadcast_nft(session, gift_description(gift))
+            sticker_file_id = (gift.get("sticker") or {}).get("file_id")
+            await broadcast_gift(session, gift_description(gift), sticker_file_id=sticker_file_id)
     gift_catalog = current
     logging.info('Telegram gifts scan complete. Catalog: %d; new gifts: %d', len(current), len(new_ids))
 
@@ -277,7 +320,11 @@ async def scan_portals_sales(session):
 
     for key, action in reversed(found):
         if users:
-            await broadcast_nft(session, portals_sale_message(action))
+            await broadcast_gift(
+                session,
+                portals_sale_message(action),
+                photo=extract_nft_image(action.get("nft") or {}),
+            )
         known.add(key)
     portals_seen_sales = list(known)[-2000:]
     logging.info("Portals sales scan complete. New purchases: %d", len(found))
@@ -328,7 +375,10 @@ async def handle_update(session, update):
             "Если ты видишь это сообщение, бот успешно отправляет уведомления.\n"
             "Мониторинг новых подарков и продаж продолжает работать."
         )
-        delivered = await send_message(session, user_id, test_text)
+        delivered = await broadcast_gift(
+            session, test_text,
+            photo="https://telegram.org/img/t_logo.png",
+        )
         if delivered:
             logging.info("Test notification delivered to subscriber %s.", user_id)
         else:
