@@ -190,25 +190,17 @@ def extract_nft_url(action):
 gift_catalog = {}
 
 def gift_description(gift):
-    sticker = gift.get('sticker') or {}
-    emoji = sticker.get('emoji') or '🎁'
-    gift_id = str(gift.get('id', 'unknown'))
-    lines = ['🎁 Новый подарок Telegram появился в каталоге!', '', 'Подарок: ' + emoji, 'ID: ' + gift_id, 'Цена: ' + str(gift.get('star_count', '—')) + ' ⭐']
-    if gift.get('upgrade_star_count') is not None:
-        lines.append('Улучшение до коллекционного: ' + str(gift['upgrade_star_count']) + ' ⭐')
-    if gift.get('total_count') is not None:
-        lines.append('Тираж: ' + str(gift['total_count']))
-    if gift.get('remaining_count') is not None:
-        lines.append('Осталось: ' + str(gift['remaining_count']))
-    if gift.get('unique_gift_variant_count') is not None:
-        lines.append('Вариантов коллекционного подарка: ' + str(gift['unique_gift_variant_count']))
-    if gift.get('is_premium'):
-        lines.append('Доступен только Telegram Premium')
-    publisher = gift.get('publisher_chat') or {}
-    if publisher:
-        lines.append('Издатель: ' + str(publisher.get('title') or publisher.get('username') or 'Канал'))
-    lines.extend(['', 'Каталог подарков Telegram: https://t.me/gifts'])
-    return "\n".join(lines)
+    sticker = gift.get("sticker") or {}
+    emoji = sticker.get("emoji") or "🎁"
+    gift_id = str(gift.get("id", "unknown"))
+    price = gift.get("star_count", "—")
+    return (
+        f"{emoji} Новый подарок Telegram\\n"
+        f"ID: {gift_id}\\n"
+        f"💰 Цена: {price} ⭐\\n\\n"
+        "🔗 Подарки: https://t.me/gifts\\n"
+        "🛒 Маркет: https://portal-market.com"
+    )
 
 async def scan_telegram_gifts(session):
     global gift_catalog
@@ -251,33 +243,18 @@ def portals_sale_key(action):
 
 def portals_sale_message(action):
     nft = action.get("nft") or {}
-    attrs = nft.get("attributes") or []
-    traits = {}
-    for attr in attrs:
-        if isinstance(attr, dict):
-            traits[str(attr.get("type") or attr.get("trait_type") or "Атрибут")] = attr.get("value")
     name = nft.get("name") or nft.get("title") or nft.get("collection_name") or "Telegram-подарок"
     number = nft.get("number") or nft.get("external_collection_number")
-    model = traits.get("Model") or traits.get("model")
-    backdrop = traits.get("Backdrop") or traits.get("backdrop")
-    symbol = traits.get("Symbol") or traits.get("symbol")
-    lines = ["💸 НОВАЯ ПРОДАЖА TELEGRAM-ПОДАРКА", "", "🎁 " + str(name)]
-    if number is not None:
-        lines.append("Номер: #" + str(number))
-    if model:
-        lines.append("Модель: " + str(model))
-    if backdrop:
-        lines.append("Фон: " + str(backdrop))
-    if symbol:
-        lines.append("Символ: " + str(symbol))
-    if action.get("amount") is not None:
-        lines.append("Цена: " + str(action["amount"]) + " GRAM")
-    if action.get("created_at"):
-        lines.append("Время: " + str(action["created_at"]))
-    lines.append("Площадка: Portals")
-    lines.append("")
-    lines.append("Источник: https://portal-market.com")
-    return "\n".join(lines)
+    gift_label = str(name) + (f" #{number}" if number is not None else "")
+    price = action.get("amount", "—")
+    gift_url = extract_nft_url(action) or "https://t.me/gifts"
+    return (
+        "💸 Продажа Telegram-подарка\\n"
+        f"🎁 {gift_label}\\n"
+        f"💰 Цена: {price} GRAM\\n\\n"
+        f"🔗 Подарок: {gift_url}\\n"
+        "🛒 Маркет: https://portal-market.com"
+    )
 
 async def scan_portals_sales(session):
     global portals_seen_sales
