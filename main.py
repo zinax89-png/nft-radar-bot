@@ -16,6 +16,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 ADMIN_ID = int(os.getenv("ADMIN_ID") or "0")
+PORTALS_API_KEY = os.getenv("PORTALS_API_KEY", "").strip()
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 STATE_API = f"https://api.github.com/repos/{REPOSITORY}/contents/users.json"
@@ -24,10 +25,11 @@ users = set()
 offset = 0
 state_sha = None
 gift_catalog = {}
+portals_seen_sales = []
 
 
 async def load_state(session):
-    global users, offset, state_sha, gift_catalog
+    global users, offset, state_sha, gift_catalog, portals_seen_sales
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -41,6 +43,7 @@ async def load_state(session):
             offset = 0
             state_sha = None
             gift_catalog = {}
+            portals_seen_sales = []
             return
         response.raise_for_status()
         data = await response.json()
@@ -51,6 +54,7 @@ async def load_state(session):
     users = {int(user_id) for user_id in state.get("users", [])}
     offset = int(state.get("offset", 0))
     gift_catalog = {str(k): v for k, v in state.get("gift_catalog", {}).items()}
+    portals_seen_sales = [str(x) for x in state.get("portals_seen_sales", [])]
 
 
 async def save_state(session):
@@ -60,6 +64,7 @@ async def save_state(session):
         "users": sorted(users),
         "offset": offset,
         "gift_catalog": gift_catalog,
+        "portals_seen_sales": portals_seen_sales[-2000:],
     }
     encoded = base64.b64encode(
         json.dumps(state, ensure_ascii=False).encode("utf-8")
@@ -168,6 +173,109 @@ async def scan_telegram_gifts(session):
     gift_catalog = current
     logging.info('Telegram gifts scan complete. Catalog: %d; new gifts: %d', len(current), len(new_ids))
 
+
+# Portals marketplace completed-sale monitor.
+# Requires PORTALS_API_KEY (GitHub Actions secret). The free API tier is
+# documented as 1 request/second. This feed covers Portals only.
+def portals_sale_key(action):
+    if action.get("id") is not None:
+        return str(action["id"])
+    nft = action.get("nft") or {}
+    return "|".join(str(x or "") for x in (
+        action.get("type"), action.get("created_at"), nft.get("id"),
+        action.get("amount"), nft.get("name"), nft.get("number")
+    ))
+
+def portals_sale_message(action):
+    nft = action.get("nft") or {}
+    attrs = nft.get("attributes") or []
+    traits = {}
+    for attr in attrs:
+        if isinstance(attr, dict):
+            traits[str(attr.get("type") or attr.get("trait_type") or "Атрибут")] = attr.get("value")
+    name = nft.get("name") or nft.get("title") or nft.get("collection_name") or "Telegram-подарок"
+    number = nft.get("number") or nft.get("external_collection_number")
+    model = traits.get("Model") or traits.get("model")
+    backdrop = traits.get("Backdrop") or traits.get("backdrop")
+    symbol = traits.get("Symbol") or traits.get("symbol")
+    lines = ["💸 НОВАЯ ПРОДАЖА TELEGRAM-ПОДАРКА", "", "🎁 " + str(name)]
+    if number is not None:
+        lines.append("Номер: #" + str(number))
+    if model:
+        lines.append("Модель: " + str(model))
+    if backdrop:
+        lines.append("Фон: " + str(backdrop))
+    if symbol:
+        lines.append("Символ: " + str(symbol))
+    if action.get("amount") is not None:
+        lines.append("Цена: " + str(action["amount"]) + " GRAM")
+    if action.get("created_at"):
+        lines.append("Время: " + str(action["created_at"]))
+    lines.append("Площадка: Portals")
+    lines.append("")
+    lines.append("Источник: https://portal-market.com")
+    return "\\n".join(lines)
+
+async def scan_portals_sales(session):
+    global portals_seen_sales
+    if not PORTALS_API_KEY:
+        logging.info("Portals sales monitor skipped: PORTALS_API_KEY is not configured.")
+        return
+
+    headers = {"Authorization": "partners " + PORTALS_API_KEY}
+    url = "https://portal-market.com/partners/market/actions/"
+    known = set(portals_seen_sales)
+    found = []
+    offset_value = 0
+    is_baseline = not portals_seen_sales
+
+    # Read newest completed purchases, paging until we reach already-seen data.
+    for page in range(35):  # API documents offsets up to 700, 20 actions/page.
+        params = {"action_types": "purchase", "limit": 20, "offset": offset_value, "sort_by": "created_at desc"}
+        async with session.get(url, headers=headers, params=params) as response:
+            if response.status == 503:
+                logging.warning("Portals market feed temporarily unavailable (503).")
+                return
+            if response.status in (401, 403):
+                body = await response.text()
+                logging.error("Portals API access error %s: %s", response.status, body[:500])
+                return
+            response.raise_for_status()
+            data = await response.json()
+
+        actions = data.get("actions", []) if isinstance(data, dict) else []
+        if not actions:
+            break
+        page_new = []
+        reached_known = False
+        for action in actions:
+            key = portals_sale_key(action)
+            if key in known:
+                reached_known = True
+                continue
+            page_new.append((key, action))
+        found.extend(page_new)
+        if reached_known or len(actions) < 20:
+            break
+        offset_value += 20
+        await asyncio.sleep(1.05)  # respect the documented free-tier rate limit
+
+    if is_baseline:
+        # First run stores current activity and does not send historical sales.
+        portals_seen_sales = list(dict.fromkeys(portals_sale_key(a) for a in (
+            action for _, action in found
+        )))
+        logging.info("Portals sales baseline saved: %d recent purchases.", len(portals_seen_sales))
+        return
+
+    for key, action in reversed(found):
+        if users:
+            await broadcast_nft(session, portals_sale_message(action))
+        known.add(key)
+    portals_seen_sales = list(known)[-2000:]
+    logging.info("Portals sales scan complete. New purchases: %d", len(found))
+
+
 async def handle_update(session, update):
     global offset
 
@@ -243,6 +351,7 @@ async def main():
             await handle_update(session, update)
 
         await scan_telegram_gifts(session)
+        await scan_portals_sales(session)
         await save_state(session)
         logging.info("Готово. Подписчиков: %d", len(users))
 
