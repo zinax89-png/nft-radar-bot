@@ -3,7 +3,7 @@ import json
 import base64
 import logging
 import time
-from urllib.parse import quote
+import asyncio
 
 import aiohttp
 
@@ -16,21 +16,20 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 ADMIN_ID = int(os.getenv("ADMIN_ID") or "0")
-OPENSEA_API_KEY = os.getenv("OPENSEA_API_KEY", "").strip()
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 STATE_API = f"https://api.github.com/repos/{REPOSITORY}/contents/users.json"
-OPENSEA_EVENTS_API = "https://api.opensea.io/api/v2/events"
 
 users = set()
 offset = 0
 state_sha = None
 last_nft_scan = 0
 seen_nft_events = []
+chain_blocks = {}
 
 
 async def load_state(session):
-    global users, offset, state_sha, last_nft_scan, seen_nft_events
+    global users, offset, state_sha, last_nft_scan, seen_nft_events, chain_blocks
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -45,6 +44,7 @@ async def load_state(session):
             state_sha = None
             last_nft_scan = int(time.time()) - 300
             seen_nft_events = []
+            chain_blocks = {}
             return
         response.raise_for_status()
         data = await response.json()
@@ -55,7 +55,8 @@ async def load_state(session):
     users = {int(user_id) for user_id in state.get("users", [])}
     offset = int(state.get("offset", 0))
     last_nft_scan = int(state.get("last_nft_scan", int(time.time()) - 300))
-    seen_nft_events = list(state.get("seen_nft_events", []))[-500:]
+    seen_nft_events = list(state.get("seen_nft_events", []))[-1000:]
+    chain_blocks = {str(k): int(v) for k, v in state.get("chain_blocks", {}).items()}
 
 
 async def save_state(session):
@@ -65,7 +66,8 @@ async def save_state(session):
         "users": sorted(users),
         "offset": offset,
         "last_nft_scan": last_nft_scan,
-        "seen_nft_events": seen_nft_events[-500:],
+        "seen_nft_events": seen_nft_events[-1000:],
+        "chain_blocks": chain_blocks,
     }
     encoded = base64.b64encode(
         json.dumps(state, ensure_ascii=False).encode("utf-8")
@@ -124,130 +126,138 @@ async def broadcast_nft(session, text):
     logging.info("NFT alert delivered to %d/%d subscribers", sent, len(users))
 
 
-def event_key(event):
-    asset = event.get("nft") or event.get("asset") or {}
-    contract = asset.get("contract") or {}
-    if isinstance(contract, dict):
-        address = contract.get("address", "")
-    else:
-        address = str(contract)
-    return "|".join([
-        str(event.get("chain", "")),
-        address,
-        str(asset.get("identifier", asset.get("token_id", ""))),
-        str(event.get("transaction", "")),
-        str(event.get("event_timestamp", "")),
-    ])
+# PublicNode exposes public JSON-RPC endpoints; no API key is needed.
+CHAINS = {
+    "ethereum": {
+        "rpc": "https://ethereum.publicnode.com",
+        "explorer": "https://etherscan.io",
+        "opensea": "ethereum",
+    },
+    "base": {
+        "rpc": "https://base.publicnode.com",
+        "explorer": "https://basescan.org",
+        "opensea": "base",
+    },
+    "polygon": {
+        "rpc": "https://polygon-bor-rpc.publicnode.com",
+        "explorer": "https://polygonscan.com",
+        "opensea": "matic",
+    },
+}
+
+# ERC-721 Transfer, ERC-1155 TransferSingle and TransferBatch.
+ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
+MINT_FILTERS = [
+    ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", None, ZERO_ADDRESS_TOPIC],
+    ["0xc3d58168c5bfaa1b8b2dc8f0b6a4c6f6e7b6f5f6b5f5f5f5f5f5f5f5f5f5f5f5", None, ZERO_ADDRESS_TOPIC],
+    ["0x4a39dc06d4c0dbc64b70b7a1f6e8b5d5c5e5b3b5b5f5f5f5f5f5f5f5f5f5f5f5", None, ZERO_ADDRESS_TOPIC],
+]
 
 
-def make_nft_message(event):
-    asset = event.get("nft") or event.get("asset") or {}
-    contract = asset.get("contract") or {}
-    if isinstance(contract, dict):
-        address = contract.get("address", "")
-    else:
-        address = str(contract)
+def log_event_key(chain, log):
+    return f"{chain}:{log.get('transactionHash', '')}:{log.get('logIndex', '')}"
 
-    chain = str(event.get("chain") or "ethereum")
-    token_id = str(asset.get("identifier") or asset.get("token_id") or "unknown")
-    name = asset.get("name") or "Новый NFT"
-    collection = asset.get("collection") or {}
-    if isinstance(collection, dict):
-        collection_name = collection.get("name") or collection.get("slug") or "Неизвестная коллекция"
-    else:
-        collection_name = str(collection or "Неизвестная коллекция")
 
-    if address and token_id != "unknown":
-        url = (
-            "https://opensea.io/assets/"
-            + quote(chain, safe="")
-            + "/"
-            + quote(address, safe="")
-            + "/"
-            + quote(token_id, safe="")
-        )
-        return (
-            "🆕 Новый NFT (mint) обнаружен на OpenSea!\n\n"
-            f"Коллекция: {collection_name}\n"
-            f"NFT: {name}\n"
-            f"ID: {token_id}\n"
-            f"Сеть: {chain}\n\n"
-            f"Открыть: {url}"
-        )
+def make_chain_mint_message(chain, log):
+    contract = log.get("address", "")
+    tx_hash = log.get("transactionHash", "")
+    token_id = "не указан"
+    topics = log.get("topics", [])
+    # ERC-721 token ID is the fourth topic.
+    if len(topics) >= 4:
+        try:
+            token_id = str(int(topics[3], 16))
+        except (TypeError, ValueError):
+            pass
 
+    cfg = CHAINS[chain]
+    marketplace_url = (
+        f"https://opensea.io/assets/{cfg['opensea']}/{contract}"
+        + (f"/{token_id}" if token_id != "не указан" else "")
+    )
+    explorer_url = f"{cfg['explorer']}/tx/{tx_hash}" if tx_hash else cfg["explorer"]
     return (
-        "🆕 Новое событие mint на OpenSea!\n"
-        f"Коллекция: {collection_name}\n"
-        f"NFT: {name}\n"
-        f"Сеть: {chain}"
+        f"🆕 Новый NFT mint в сети {chain.title()}!\\n\\n"
+        f"Контракт: {contract}\\n"
+        f"Token ID: {token_id}\\n"
+        f"Транзакция: {explorer_url}\\n"
+        f"Открыть на OpenSea: {marketplace_url}"
     )
 
 
-async def scan_opensea(session):
-    global last_nft_scan, seen_nft_events
+async def rpc_call(session, url, method, params):
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    async with session.post(url, json=payload) as response:
+        response.raise_for_status()
+        data = await response.json()
+    if "error" in data:
+        raise RuntimeError(f"RPC {method} error: {data['error']}")
+    return data.get("result")
 
-    if not OPENSEA_API_KEY:
-        logging.warning(
-            "NFT monitoring is paused: add the OPENSEA_API_KEY Actions secret."
-        )
+
+async def scan_chain(session, chain):
+    global chain_blocks, seen_nft_events
+
+    cfg = CHAINS[chain]
+    rpc = cfg["rpc"]
+    latest_hex = await rpc_call(session, rpc, "eth_blockNumber", [])
+    latest = int(latest_hex, 16)
+
+    # Start close to the chain head on first run; do not send old historical mints.
+    cursor = chain_blocks.get(chain)
+    if cursor is None:
+        chain_blocks[chain] = max(0, latest - 3)
+        logging.info("%s initialized at block %d", chain, chain_blocks[chain])
         return
 
-    now = int(time.time())
-    after = max(0, last_nft_scan - 120)
-    headers = {
-        "accept": "application/json",
-        "x-api-key": OPENSEA_API_KEY,
-    }
-    params = {
-        "event_type": "mint",
-        "after": after,
-        "limit": 50,
-    }
+    start_block = cursor + 1
+    if start_block > latest:
+        return
 
+    # Small ranges keep public RPC requests lightweight and reduce provider limits.
     new_seen = set(seen_nft_events)
-    found = []
-    cursor = None
+    notifications = []
+    while start_block <= latest:
+        end_block = min(start_block + 499, latest)
+        for topics in MINT_FILTERS:
+            logs = await rpc_call(
+                session,
+                rpc,
+                "eth_getLogs",
+                [{
+                    "fromBlock": hex(start_block),
+                    "toBlock": hex(end_block),
+                    "topics": topics,
+                }],
+            )
+            for log in logs or []:
+                key = log_event_key(chain, log)
+                if key not in new_seen:
+                    new_seen.add(key)
+                    notifications.append((int(log.get("blockNumber", "0x0"), 16),
+                                          int(log.get("logIndex", "0x0"), 16),
+                                          make_chain_mint_message(chain, log)))
 
-    for _ in range(3):
-        page_params = dict(params)
-        if cursor:
-            page_params["next"] = cursor
+        start_block = end_block + 1
 
-        async with session.get(
-            OPENSEA_EVENTS_API, headers=headers, params=page_params
-        ) as response:
-            if response.status == 429:
-                logging.warning("OpenSea rate limit reached; will retry next run.")
-                return
-            if response.status in (401, 403):
-                logging.error(
-                    "OpenSea API key rejected or not authorized (HTTP %s).",
-                    response.status,
-                )
-                return
-            response.raise_for_status()
-            data = await response.json()
-
-        events = data.get("asset_events", [])
-        for event in events:
-            key = event_key(event)
-            if key not in new_seen:
-                new_seen.add(key)
-                found.append(event)
-
-        cursor = data.get("next")
-        if not cursor or len(events) < 50:
-            break
-
-    # Process oldest first so notifications arrive chronologically.
-    found.sort(key=lambda item: int(item.get("event_timestamp", 0)))
-    for event in found:
+    notifications.sort(key=lambda item: (item[0], item[1]))
+    for _, _, message in notifications:
         if users:
-            await broadcast_nft(session, make_nft_message(event))
+            await broadcast_nft(session, message)
 
-    seen_nft_events = list(new_seen)[-500:]
-    last_nft_scan = now
-    logging.info("OpenSea scan complete. New mint events: %d", len(found))
+    chain_blocks[chain] = latest
+    seen_nft_events = list(new_seen)[-1000:]
+    logging.info("%s scan complete through block %d; new mints: %d",
+                 chain, latest, len(notifications))
+
+
+async def scan_nfts(session):
+    for chain in CHAINS:
+        try:
+            await scan_chain(session, chain)
+        except Exception:
+            # Keep the previous cursor so this chain is retried on the next run.
+            logging.exception("NFT scan failed for %s", chain)
 
 
 async def handle_update(session, update):
@@ -324,11 +334,10 @@ async def main():
         for update in result.get("result", []):
             await handle_update(session, update)
 
-        await scan_opensea(session)
+        await scan_nfts(session)
         await save_state(session)
         logging.info("Готово. Подписчиков: %d", len(users))
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
