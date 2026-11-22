@@ -13,7 +13,7 @@ logging.basicConfig(
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 REPOSITORY = os.environ["GITHUB_REPOSITORY"]
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID") or "0")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 STATE_API = f"https://api.github.com/repos/{REPOSITORY}/contents/users.json"
