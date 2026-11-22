@@ -148,9 +148,11 @@ CHAINS = {
 # ERC-721 Transfer, ERC-1155 TransferSingle and TransferBatch.
 ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
 MINT_FILTERS = [
-    ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", None, ZERO_ADDRESS_TOPIC],
-    ["0xc3d58168c5bfaa1b8b2dc8f0b6a4c6f6e7b6f5f6b5f5f5f5f5f5f5f5f5f5f5f5", None, ZERO_ADDRESS_TOPIC],
-    ["0x4a39dc06d4c0dbc64b70b7a1f6e8b5d5c5e5b3b5b5f5f5f5f5f5f5f5f5f5f5f5", None, ZERO_ADDRESS_TOPIC],
+    # ERC-721 Transfer: indexed "from" is topic 1.
+    ("erc721", ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", ZERO_ADDRESS_TOPIC]),
+    # ERC-1155: indexed "from" is topic 2.
+    ("erc1155", ["0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62", None, ZERO_ADDRESS_TOPIC]),
+    ("erc1155", ["0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb", None, ZERO_ADDRESS_TOPIC]),
 ]
 
 
@@ -163,12 +165,14 @@ def make_chain_mint_message(chain, log):
     tx_hash = log.get("transactionHash", "")
     token_id = "не указан"
     topics = log.get("topics", [])
-    # ERC-721 token ID is the fourth topic.
-    if len(topics) >= 4:
-        try:
+    # ERC-721 token ID is topic 3; ERC-1155 token ID is the first data word.
+    try:
+        if len(topics) >= 4:
             token_id = str(int(topics[3], 16))
-        except (TypeError, ValueError):
-            pass
+        elif log.get("data") and log["data"] != "0x":
+            token_id = str(int(log["data"][2:66], 16))
+    except (TypeError, ValueError):
+        pass
 
     cfg = CHAINS[chain]
     marketplace_url = (
@@ -219,7 +223,7 @@ async def scan_chain(session, chain):
     notifications = []
     while start_block <= latest:
         end_block = min(start_block + 499, latest)
-        for topics in MINT_FILTERS:
+        for event_kind, topics in MINT_FILTERS:
             logs = await rpc_call(
                 session,
                 rpc,
@@ -231,6 +235,9 @@ async def scan_chain(session, chain):
                 }],
             )
             for log in logs or []:
+                # ERC-20 uses the same Transfer signature as ERC-721, but has only 3 topics.
+                if event_kind == "erc721" and len(log.get("topics", [])) != 4:
+                    continue
                 key = log_event_key(chain, log)
                 if key not in new_seen:
                     new_seen.add(key)
