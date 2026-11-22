@@ -277,7 +277,7 @@ def portals_sale_message(action):
     lines.append("Площадка: Portals")
     lines.append("")
     lines.append("Источник: https://portal-market.com")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 async def scan_portals_sales(session):
     global portals_seen_sales
@@ -385,7 +385,8 @@ async def handle_update(session, update):
             "/stop или /unsubscribe — отписаться\n"
             "/status — проверить подписку\n"
             "/test — получить тестовое уведомление\n"
-            "/help — показать эту справку"
+            "/help — показать эту справку\n"
+            "/id — показать твой Telegram ID"
         )
         await send_message(session, user_id, help_text)
 
@@ -406,9 +407,9 @@ async def handle_update(session, update):
             return
         await send_message(
             session, user_id,
-            f"📊 Статистика Global NFT Radar\\n\\nПодписчиков: {len(users)}"
-            f"\\nПодарков в каталоге: {len(gift_catalog)}"
-            f"\\nПродаж в базе: {len(portals_seen_sales)}"
+            f"📊 Статистика Global NFT Radar\n\nПодписчиков: {len(users)}"
+            f"\nПодарков в каталоге: {len(gift_catalog)}"
+            f"\nПродаж в базе: {len(portals_seen_sales)}"
         )
 
     elif command == "/test":
@@ -451,6 +452,8 @@ async def register_bot_commands(session):
     commands = [
         {"command": "start", "description": "Подписаться на уведомления"},
         {"command": "stop", "description": "Отписаться от уведомлений"},
+        {"command": "subscribe", "description": "Подписаться на уведомления"},
+        {"command": "unsubscribe", "description": "Отписаться от уведомлений"},
         {"command": "status", "description": "Статус подписки"},
         {"command": "test", "description": "Тестовое уведомление"},
         {"command": "help", "description": "Список команд"},
